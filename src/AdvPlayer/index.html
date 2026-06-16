@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DotAbyss ADV Player</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="reader-shell">
+    <aside class="story-pane">
+      <header>
+        <div class="app-title">DotAbyss ADV Player</div>
+        <div id="storyCount" class="muted">loading</div>
+      </header>
+      <div id="storyList" class="story-list"></div>
+    </aside>
+
+    <section class="play-pane">
+      <header class="toolbar">
+        <div>
+          <div id="storyTitle" class="story-title">DotAbyss</div>
+          <div id="storyMeta" class="muted"></div>
+        </div>
+        <div class="toolbar-actions">
+          <label class="select-control" title="Live2D mosaic material mode">
+            <span>Mosaic</span>
+            <select id="mosaicMode">
+              <option value="original" selected>Original</option>
+              <option value="mosaic">Mosaic_</option>
+              <option value="inverted">MosaicInsted_</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <button id="fitBtn" title="Fit Live2D">Fit</button>
+          <button id="reloadBtn" title="Reload story">Reload</button>
+        </div>
+      </header>
+
+      <div id="stage" class="stage">
+        <div id="bgLayer"></div>
+        <canvas id="live2dCanvas"></canvas>
+        <canvas id="mosaicLayer"></canvas>
+        <img id="fallbackTexture" alt="">
+        <div id="sceneLayer"></div>
+        <div id="screenEffectLayer"></div>
+        <div id="transitionLayer"></div>
+        <div id="fadeLayer"></div>
+        <div id="motionBadge"></div>
+        <div id="statusLine"></div>
+      </div>
+
+      <div id="messageBox" class="message-box">
+        <div id="speaker" class="speaker"></div>
+        <div id="message" class="message"></div>
+      </div>
+
+      <div class="controls">
+        <button id="prevBtn">Prev</button>
+        <button id="nextBtn" class="primary">Next</button>
+        <button id="stepBtn">Step</button>
+        <button id="autoBtn">Auto</button>
+        <input id="seek" type="range" min="0" max="0" value="0">
+        <div id="position" class="position">0 / 0</div>
+      </div>
+    </section>
+
+    <aside class="inspect-pane">
+      <header>
+        <button class="tab active" data-tab="commands">Script</button>
+        <button class="tab" data-tab="models">Models</button>
+        <button class="tab" data-tab="state">State</button>
+      </header>
+      <section id="commandsTab" class="tab-panel active">
+        <div id="commandList" class="command-list"></div>
+      </section>
+      <section id="modelsTab" class="tab-panel">
+        <pre id="modelInfo"></pre>
+      </section>
+      <section id="stateTab" class="tab-panel">
+        <pre id="stateInfo"></pre>
+      </section>
+    </aside>
+  </main>
+
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
