@@ -73,8 +73,11 @@ if ($Portable) {
   $stage = Join-Path $Repo "build/_portable/DotAbyssPlayer"
   if (Test-Path (Join-Path $Repo "build/_portable")) { Remove-Item (Join-Path $Repo "build/_portable") -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $stage | Out-Null
-  Copy-Item (Join-Path $rel "DotAbyssPlayer.exe") $stage -Force
-  Copy-Item (Join-Path $Repo "desktop/src-tauri/resources") (Join-Path $stage "resources") -Recurse -Force
+  # Crate/binary name is `dotabyss-desktop`; give the portable a friendly name.
+  Copy-Item (Join-Path $rel "dotabyss-desktop.exe") (Join-Path $stage "DotAbyssPlayer.exe") -Force
+  # Lay resources beside the exe so resource_dir()/exe-dir lookup finds backend/ and bin/.
+  Copy-Item (Join-Path $Repo "desktop/src-tauri/resources/backend") (Join-Path $stage "backend") -Recurse -Force
+  Copy-Item (Join-Path $Repo "desktop/src-tauri/resources/bin") (Join-Path $stage "bin") -Recurse -Force
   New-Item -ItemType File -Force -Path (Join-Path $stage "portable.txt") | Out-Null
   Compress-Archive -Path $stage -DestinationPath (Join-Path $Repo "build/DotAbyssPlayer-portable.zip") -Force
   Write-Host "Portable -> build/DotAbyssPlayer-portable.zip" -ForegroundColor Green

@@ -27,18 +27,30 @@ fn free_port() -> u16 {
         .unwrap_or(8777)
 }
 
+/// Look for a bundled resource across candidate roots: the Tauri resource dir (NSIS
+/// install) and the exe's own directory (portable layout).
+fn resource_file(app: &tauri::AppHandle, rel: &str) -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(r) = app.path().resource_dir() {
+        roots.push(r);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    roots.into_iter().map(|r| r.join(rel)).find(|p| p.exists())
+}
+
 /// Resolve the backend command: bundled PyInstaller exe if present, else dev Python.
 fn backend_command(app: &tauri::AppHandle) -> Command {
-    // Packaged: <resources>/backend/DotAbyssBackend.exe
-    if let Ok(res) = app.path().resource_dir() {
-        let exe = res.join("backend").join(if cfg!(windows) {
-            "DotAbyssBackend.exe"
-        } else {
-            "DotAbyssBackend"
-        });
-        if exe.exists() {
-            return Command::new(exe);
-        }
+    let backend_rel = if cfg!(windows) {
+        "backend/DotAbyssBackend.exe"
+    } else {
+        "backend/DotAbyssBackend"
+    };
+    if let Some(exe) = resource_file(app, backend_rel) {
+        return Command::new(exe);
     }
     // Dev fallback: run the source server with the repo's venv/python.
     let repo = repo_root();
@@ -84,20 +96,13 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> std::io::Result<Child> {
     if let Some(data) = portable_data_dir() {
         cmd.env("DOTABYSS_DATA_DIR", data);
     }
-    // Point the backend at bundled tools if present (packaged build).
-    if let Ok(res) = app.path().resource_dir() {
-        let dl = res.join("bin").join(if cfg!(windows) {
-            "DotAbyssClient.exe"
-        } else {
-            "DotAbyssClient"
-        });
-        if dl.exists() {
-            cmd.env("DOTABYSS_DOWNLOADER", dl);
-        }
-        let vg = res.join("bin").join("vgmstream").join("vgmstream-cli.exe");
-        if vg.exists() {
-            cmd.env("DOTABYSS_VGMSTREAM", vg);
-        }
+    // Point the backend at bundled tools if present (packaged / portable build).
+    let downloader_rel = if cfg!(windows) { "bin/DotAbyssClient.exe" } else { "bin/DotAbyssClient" };
+    if let Some(dl) = resource_file(app, downloader_rel) {
+        cmd.env("DOTABYSS_DOWNLOADER", dl);
+    }
+    if let Some(vg) = resource_file(app, "bin/vgmstream/vgmstream-cli.exe") {
+        cmd.env("DOTABYSS_VGMSTREAM", vg);
     }
 
     #[cfg(windows)]
