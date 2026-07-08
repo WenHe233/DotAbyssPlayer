@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import queue
 import re
 import shutil
 import sys
@@ -332,16 +334,21 @@ def _story_ogg_and_clean(story_out: Path):
                 pass
 
 
-def process_story(unit: StoryUnit, data_root: Path, tmp_root: Path,
-                  vgmstream: str | None, manifest_path: Path,
-                  export_audio: bool = True, progress: Progress | None = None) -> dict:
-    """Download one story's bundles into an isolated temp dir, extract, decode, clean."""
+def _download_story(unit: StoryUnit, tmp_root: Path, progress: Progress | None = None) -> Path:
+    """Producer half: fetch a story's bundles into an isolated temp dir; return it."""
     story_tmp = tmp_root / unit.story_id
     if story_tmp.exists():
         shutil.rmtree(story_tmp, ignore_errors=True)
     story_tmp.mkdir(parents=True, exist_ok=True)
+    download_rows(unit.rows, story_tmp, progress=progress)
+    return story_tmp
+
+
+def _extract_downloaded_story(unit: StoryUnit, story_tmp: Path, data_root: Path,
+                              vgmstream: str | None, manifest_path: Path,
+                              export_audio: bool = True, progress: Progress | None = None) -> dict:
+    """Consumer half: extract + decode + ogg + clean; always removes the temp bundle dir."""
     try:
-        download_rows(unit.rows, story_tmp, progress=progress)
         root = story_tmp / unit.root_rel
         if not root.exists():
             root = story_tmp
@@ -363,6 +370,81 @@ def process_story(unit: StoryUnit, data_root: Path, tmp_root: Path,
         return entry
     finally:
         shutil.rmtree(story_tmp, ignore_errors=True)
+
+
+def process_story(unit: StoryUnit, data_root: Path, tmp_root: Path,
+                  vgmstream: str | None, manifest_path: Path,
+                  export_audio: bool = True, progress: Progress | None = None) -> dict:
+    """Single-story download+extract (used by extract_one / repair; not concurrent)."""
+    story_tmp = _download_story(unit, tmp_root, progress)
+    return _extract_downloaded_story(unit, story_tmp, data_root, vgmstream, manifest_path,
+                                     export_audio, progress)
+
+
+def _default_workers() -> int:
+    env = os.environ.get("DOTABYSS_WORKERS")
+    if env and env.isdigit() and int(env) > 0:
+        return int(env)
+    return min(os.cpu_count() or 4, 6)
+
+
+def run_stories_concurrent(units, data_root: Path, tmp_root: Path, vgmstream: str | None,
+                           manifest_path: Path, progress: Progress, on_entry,
+                           workers: int | None = None):
+    """Producer-consumer pipeline: 1 downloader thread prefetches story bundles into a bounded
+    queue while N worker threads extract+decode in parallel (download<->extract overlap + parallel
+    extraction). ``on_entry(entry)`` runs under a lock per completed story for index/state writes.
+
+    Threads (not processes): vgmstream (subprocess) and soundfile (C) release the GIL, so N
+    threads run that many decodes in parallel; freeze-safe (no multiprocessing). The bounded
+    queue (maxsize workers+2) caps how many downloaded-but-unextracted stories sit on disk,
+    preserving the streaming ~5-6 GB peak.
+    """
+    workers = workers or _default_workers()
+    q: "queue.Queue" = queue.Queue(maxsize=workers + 2)
+    index_lock = threading.Lock()
+    _SENTINEL = object()
+
+    def producer():
+        for unit in units:
+            try:
+                story_tmp = _download_story(unit, tmp_root, progress)
+            except Exception as exc:  # noqa: BLE001 — skip this story, keep the pipeline going
+                progress.error(f"download:{unit.story_id}", repr(exc))
+                progress.tick(unit.story_id)  # count the skip so done/total stays consistent
+                continue
+            q.put((unit, story_tmp))          # blocks when full -> disk backpressure
+        for _ in range(workers):
+            q.put(_SENTINEL)
+
+    def consumer():
+        while True:
+            item = q.get()
+            try:
+                if item is _SENTINEL:
+                    return
+                unit, story_tmp = item
+                try:
+                    progress.update(currentStory=unit.story_id)
+                    entry = _extract_downloaded_story(unit, story_tmp, data_root, vgmstream,
+                                                      manifest_path, progress=progress)
+                    with index_lock:
+                        on_entry(entry)
+                except Exception as exc:  # noqa: BLE001
+                    progress.error(f"story:{unit.story_id}", repr(exc))
+                finally:
+                    progress.tick(unit.story_id)
+            finally:
+                q.task_done()
+
+    prod = threading.Thread(target=producer, daemon=True)
+    prod.start()
+    consumers = [threading.Thread(target=consumer, daemon=True) for _ in range(workers)]
+    for t in consumers:
+        t.start()
+    prod.join()
+    for t in consumers:
+        t.join()
 
 
 _TITLE_PLACEHOLDERS = {"", "タイトル", "タイトルを設定してください"}
@@ -566,19 +648,18 @@ def run_setup(manifest_path: Path, data_root: Path, *, tmp_root: Path | None = N
         story_ids = [sid for sid in story_ids
                      if not (data_root / "stories" / sid / "story.json").exists()]
 
-    progress.update(phase="stories", total=len(story_ids), done=0)
-    for sid in story_ids:
-        unit = plan.stories[sid]
-        progress.update(currentStory=sid, message=f"story {sid}")
-        try:
-            entry = process_story(unit, data_root, tmp_root, vgmstream, manifest_path, progress=progress)
-            upsert_index(data_root, entry)
-            state.setdefault("stories", {})[sid] = {"scriptHash": unit.script_hash}
-        except Exception as exc:  # noqa: BLE001
-            progress.error(f"story:{sid}", repr(exc))
-        progress.tick(sid)
-        if progress.state["done"] % 25 == 0:
+    units = [plan.stories[sid] for sid in story_ids]
+    progress.update(phase="stories", total=len(units), done=0)
+    _save_n = {"n": 0}
+
+    def on_entry(entry):
+        upsert_index(data_root, entry)
+        state.setdefault("stories", {})[entry["id"]] = {"scriptHash": entry.get("scriptHash", "")}
+        _save_n["n"] += 1
+        if _save_n["n"] % 25 == 0:
             save_state(data_root, state)
+
+    run_stories_concurrent(units, data_root, tmp_root, vgmstream, manifest_path, progress, on_entry)
 
     if do_base:
         run_base(plan, data_root, tmp_root, vgmstream, catalog, progress)

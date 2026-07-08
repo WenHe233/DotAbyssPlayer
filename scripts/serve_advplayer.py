@@ -368,14 +368,15 @@ def _job_update(progress: pipeline.Progress, profile: str):
                     message=f"{len(changed)} changed, {len(removed)} removed")
     vg = _vgmstream()
     tmp_root = DATA_DIR / "_work"
-    for sid in changed:
-        try:
-            entry = pipeline.process_story(plan.stories[sid], DATA_DIR, tmp_root, vg, MANIFEST_PATH, progress=progress)
-            pipeline.upsert_index(DATA_DIR, entry)
-            known[sid] = {"scriptHash": plan.stories[sid].script_hash}
-        except Exception as exc:  # noqa: BLE001
-            progress.error(f"story:{sid}", repr(exc))
-        progress.tick(sid)
+
+    def on_entry(entry):
+        pipeline.upsert_index(DATA_DIR, entry)
+        known[entry["id"]] = {"scriptHash": entry.get("scriptHash", "")}
+
+    pipeline.run_stories_concurrent(
+        [plan.stories[sid] for sid in changed], DATA_DIR, tmp_root, vg,
+        MANIFEST_PATH, progress, on_entry,
+    )
     for sid in removed:
         shutil.rmtree(DATA_DIR / "stories" / sid, ignore_errors=True)
         known.pop(sid, None)
