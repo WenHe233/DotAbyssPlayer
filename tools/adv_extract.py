@@ -758,17 +758,34 @@ def motion3_from_fade_tree(name: str, bundle: str, tree: dict):
 
 
 def looks_like_script(text: str) -> bool:
+    # 扫描前若干非空行而非仅第一行：部分剧情（如 mainchara/hmr）以 live2dinit
+    # 等未登记命令开头，只看首行会把整份脚本误判为非脚本（scripts=[]）。
+    checked = 0
     for _, row in csv_rows(text):
         cmd = normalize_command(row)
-        return cmd in COMMAND_INFO or cmd == ":label"
+        if cmd in COMMAND_INFO or cmd == ":label" or is_text_command(cmd):
+            return True
+        checked += 1
+        if checked >= 30:
+            break
     return False
+
+
+NOVEL_ID_PREFIXES = ("evs", "hmn", "hmr", "mas", "men")
 
 
 def story_id_from_path(path: Path, fallback: str) -> str:
     parts = list(path.parts)
-    for part in reversed(parts):
-        if re.fullmatch(r"\d{8,}", part):
-            return part
+    for i in range(len(parts) - 1, -1, -1):
+        if re.fullmatch(r"\d{8,}", parts[i]):
+            num = parts[i]
+            # 前缀恢复：novel 路径形如 .../<prefix>/<num>/<prefix>/<num>.txt_<hash>.bundle，
+            # 数字目录的上级路径段即前缀（evs/hmn/hmr/mas/men）。保留前缀以对齐
+            # dotabyss-translation 的带前缀 id —— hmn/men 的数字 id 会碰撞，必须靠前缀区分。
+            for j in range(i - 1, -1, -1):
+                if parts[j].lower() in NOVEL_ID_PREFIXES:
+                    return f"{parts[j].lower()}_{num}"
+            return num
     m = re.search(r"(\d{8,})", fallback)
     return m.group(1) if m else safe_name(fallback)
 
@@ -783,9 +800,12 @@ def discover_story_roots(bundle_root: Path, limit: int = 0, prefix: str = ""):
         story_id = story_id_from_path(bundle.parent, bundle.name)
         if prefix and not story_id.startswith(prefix):
             continue
+        # story_id 现在带前缀（evs_10200010101），但磁盘上的 story 目录名是纯数字，
+        # 前缀只存在于父路径段，因此用数字部分匹配 root 目录。
+        num_id = story_id.rsplit("_", 1)[-1]
         root = None
         for parent in [bundle.parent, *bundle.parents]:
-            if parent.name == story_id:
+            if parent.name == num_id:
                 root = parent
                 break
         root = root or bundle.parent
@@ -1333,13 +1353,17 @@ def extract_story(
 
     primary_script = scripts[0] if scripts else None
     audio_ids = primary_script["audioIds"] if primary_script else []
-    manifest = collect_manifest(manifest_path, source_story_id, audio_ids)
+    # 音频/manifest 的 bundle 用纯数字 id 命名（如 10010100001.acb_<hash>.bundle），
+    # 不带 evs_/hmn_/... 前缀。source_story_id 现在带前缀，需剥掉再匹配，
+    # 否则语音 acb bundle 找不到、audioCueCount 恒为 0。
+    numeric_story_id = source_story_id.rsplit("_", 1)[-1]
+    manifest = collect_manifest(manifest_path, numeric_story_id, audio_ids)
     audio = {"cues": {}, "raw": [], "decoded": [], "errors": [], "decoder": None}
     if export_audio:
         audio = extract_audio_assets(
             story_out,
             manifest,
-            source_story_id,
+            numeric_story_id,
             audio_ids,
             bundle_root or (manifest_path.parent if manifest_path else Path(".")),
             audio_roots or [],

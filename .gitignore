@@ -17,3 +17,25 @@ src/AdvPlayer/data/*
 
 src/AdvPlayer/data_r18_all/*
 !src/AdvPlayer/data_r18_all/.gitkeep
+
+# LLM 凭据（含 api_key，切勿提交）；仅提交 config/llm.example.json 模板
+config/llm.json
+
+# 原游戏本体（RE 源，含大体积二进制）与克隆的翻译仓库（运行时自动拉取）——切勿提交
+dotabyss_x_cl/
+dotabyss-translation/
+
+# 桌面壳构建产物
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/resources/backend/*
+desktop/src-tauri/resources/bin/*
+!desktop/src-tauri/resources/**/.gitkeep
+
+# 打包临时/产物
+build/_downloader/
+build/_portable/
+build/*-portable.zip
+
+# 便携数据目录
+data-store/

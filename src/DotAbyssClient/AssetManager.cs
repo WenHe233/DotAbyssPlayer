@@ -220,9 +220,18 @@ internal sealed class AssetManager
 
     private static bool IsBundleLocation(CatalogLocation location)
     {
-        return location.InternalId != null
-            && location.InternalId.EndsWith(".bundle", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(location.ResourceType?.FullName, "UnityEngine.ResourceManagement.ResourceProviders.IAssetBundleResource", StringComparison.Ordinal);
+        if (location.InternalId == null
+            || !string.Equals(location.ResourceType?.FullName, "UnityEngine.ResourceManagement.ResourceProviders.IAssetBundleResource", StringComparison.Ordinal))
+            return false;
+
+        // 标准 Unity AssetBundle：internalId 以 .bundle 结尾。
+        if (location.InternalId.EndsWith(".bundle", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // CRI 流式资源（如 BGM 的 .awb）：同为 IAssetBundleResource 且是远端可下条目，
+        // 但由 CriResourceProvider 注册、internalId 无 .bundle 后缀，之前被整类漏下。
+        // 其 data.bundleSize/hash 齐全，URL 构造方式与 bundle 相同（见 CombineUrl）。
+        return string.Equals(location.ProviderId, "CriWare.Assets.CriResourceProvider", StringComparison.Ordinal);
     }
 
     private static bool IsLocalLoadPath(string? internalId)

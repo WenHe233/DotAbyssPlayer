@@ -1,0 +1,11 @@
+{
+  "base_url": "https://api.deepseek.com",
+  "api_key": "",
+  "model": "deepseek-v4-flash",
+  "temperature": 0.3,
+  "batch_size": 40,
+  "max_context_lines": 600,
+  "max_tokens": 8192,
+  "timeout": 180,
+  "extra_body": { "thinking": { "type": "disabled" } }
+}

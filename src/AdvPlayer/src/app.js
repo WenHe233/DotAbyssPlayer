@@ -1,3 +1,5 @@
+import { translator } from './i18n.js';
+
 const DATA_ROOT = './data/';
 const R18_DATA_ROOT = './data_r18_all/';
 const CHARA_DATA_ROOT = `${DATA_ROOT}chara/`;
@@ -54,7 +56,56 @@ const app = {
   labels: new Map(),
   registry: null,
   controller: null,
+  filter: { category: '', query: '', titleMode: false },
 };
+
+const STORY_TITLE_MODE_KEY = 'dotabyss.storyTitleMode';
+
+// 运行时变量表（对应原游戏 NovelModelVal）。setval 写入；参数表达式求值读取。每次剧情/重建时清空。
+const novelVars = new Map();
+
+// 轻量算术表达式求值：支持 + - * / ( )、数字、变量标识符（如 miA.delay）。
+// 对应原版 NovelArguments 的 GlobalCalculator（参数非纯数值时求值）。仅在含中缀运算符或引用已知变量时才求值，
+// 否则返回 null 让调用方回退——避免把 "Set"/"on"/"black" 等非数值参数误当变量（防回归）。
+function evalNovelExpr(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || !/^[\w.\s+\-*/()]+$/.test(s)) return null;
+  const hasOp = /[+\-*/()]/.test(s.replace(/^[+-]/, ''));
+  const idents = s.match(/[A-Za-z_][\w.]*/g) || [];
+  if (!hasOp && !idents.some((id) => novelVars.has(id))) return null;
+  const tokens = [];
+  const re = /\s*([0-9]*\.?[0-9]+|[A-Za-z_][\w.]*|[+\-*/()])/g;
+  let m, last = 0;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index !== last) return null;
+    last = re.lastIndex;
+    tokens.push(m[1]);
+  }
+  if (last !== s.length) return null;
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const num = (t) => (/^[0-9]*\.?[0-9]+$/.test(t) ? Number(t) : (novelVars.has(t) ? Number(novelVars.get(t)) || 0 : 0));
+  const parseFactor = () => {
+    const t = peek();
+    if (t === '+' || t === '-') { pos++; const v = parseFactor(); return t === '-' ? -v : v; }
+    if (t === '(') { pos++; const v = parseExpr(); if (peek() === ')') pos++; return v; }
+    if (t === undefined) return NaN;
+    pos++;
+    return num(t);
+  };
+  const parseTerm = () => {
+    let v = parseFactor();
+    while (peek() === '*' || peek() === '/') { const op = tokens[pos++]; const r = parseFactor(); v = op === '*' ? v * r : (r === 0 ? 0 : v / r); }
+    return v;
+  };
+  function parseExpr() {
+    let v = parseTerm();
+    while (peek() === '+' || peek() === '-') { const op = tokens[pos++]; const r = parseTerm(); v = op === '+' ? v + r : v - r; }
+    return v;
+  }
+  const v = parseExpr();
+  return (pos === tokens.length && Number.isFinite(v)) ? v : null;
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
   bindElements();
@@ -62,14 +113,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   app.registry = buildCommandRegistry();
   app.controller = new NovelModelController();
   exposeManualReader();
+  await translator.init();
+  window.translator = translator; // 调试/验证钩子
+  window.novelVars = novelVars; // 调试/验证钩子
+  window.evalNovelExpr = evalNovelExpr; // 调试/验证钩子
+  translator.mountSettingsPanel();
+  translator.onChange(() => app.controller?.message?.rerender());
   await loadIndex();
 });
 
 function bindElements() {
   for (const id of [
-    'storyCount', 'storyList', 'storyTitle', 'storyMeta', 'stage', 'live2dCanvas',
+    'storyCount', 'storyList', 'storySearch', 'storyCats', 'titleModeToggle', 'storyTitle', 'storyMeta', 'stage', 'live2dCanvas',
     'bgLayer', 'mosaicLayer', 'fallbackTexture', 'sceneLayer', 'screenEffectLayer', 'transitionLayer', 'fadeLayer', 'motionBadge', 'statusLine',
-    'messageBox', 'speaker', 'message', 'prevBtn', 'nextBtn', 'stepBtn', 'autoBtn',
+    'messageBox', 'speaker', 'message', 'prevBtn', 'nextBtn', 'stepBtn', 'autoBtn', 'replayVoiceBtn',
     'seek', 'position', 'commandList', 'modelInfo', 'stateInfo', 'fitBtn', 'reloadBtn', 'mosaicMode',
   ]) {
     el[id] = document.getElementById(id);
@@ -81,7 +138,13 @@ function bindEvents() {
   el.prevBtn.addEventListener('click', () => { app.controller.sound.unlock(); previousText(); });
   el.stepBtn.addEventListener('click', () => { app.controller.sound.unlock(); stepCommand(); });
   el.autoBtn.addEventListener('click', () => { app.controller.sound.unlock(); toggleAuto(); });
-  el.seek.addEventListener('input', () => jumpTo(Number(el.seek.value)));
+  el.replayVoiceBtn.addEventListener('click', () => { app.controller.sound.unlock(); replayCurrentVoice(); });
+  // 点画面（图像区）或字幕框都推进到下一句；其它空白区域不响应。
+  el.stage.addEventListener('click', () => { app.controller.sound.unlock(); nextText(); });
+  el.messageBox.addEventListener('click', () => { app.controller.sound.unlock(); nextText(); });
+  // 松手（change）才跳转，避免拖动过程中每格触发一次重建；拖动中仅更新位置读数。
+  el.seek.addEventListener('input', () => { el.position.textContent = `${Number(el.seek.value) + 1} / ${app.script?.commands.length || 0}`; });
+  el.seek.addEventListener('change', () => jumpTo(Number(el.seek.value)));
   el.mosaicMode.addEventListener('change', () => {
     app.controller.live2d.setMosaicMode(el.mosaicMode.value);
     updateInspectors();
@@ -89,6 +152,25 @@ function bindEvents() {
   el.fitBtn.addEventListener('click', () => app.controller.live2d.fit());
   el.reloadBtn.addEventListener('click', () => app.story && loadStory(app.story.id));
   document.addEventListener('pointerdown', () => app.controller.sound.unlock());
+  el.storySearch.addEventListener('input', () => {
+    app.filter.query = el.storySearch.value.trim().toLowerCase();
+    renderStoryList();
+  });
+  el.storyCats.addEventListener('click', (event) => {
+    const chip = event.target.closest('.cat-chip');
+    if (!chip) return;
+    app.filter.category = chip.dataset.cat || '';
+    el.storyCats.querySelectorAll('.cat-chip').forEach((c) => c.classList.toggle('active', c === chip));
+    renderStoryList();
+  });
+  const savedTitleMode = localStorage.getItem(STORY_TITLE_MODE_KEY) === '1';
+  app.filter.titleMode = savedTitleMode;
+  el.titleModeToggle.checked = savedTitleMode;
+  el.titleModeToggle.addEventListener('change', () => {
+    app.filter.titleMode = el.titleModeToggle.checked;
+    localStorage.setItem(STORY_TITLE_MODE_KEY, app.filter.titleMode ? '1' : '0');
+    renderStoryList();
+  });
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.addEventListener('click', () => switchTab(tab.dataset.tab));
   });
@@ -96,7 +178,7 @@ function bindEvents() {
 }
 
 async function loadIndex() {
-  const primaryIndex = await fetchJson(`${DATA_ROOT}index.json`);
+  const primaryIndex = await fetchJsonOptional(`${DATA_ROOT}index.json`, { stories: [] });
   const r18Index = await fetchJsonOptional(`${R18_DATA_ROOT}index.json`, { stories: [] });
   const storiesById = new Map();
   for (const source of [
@@ -121,8 +203,10 @@ async function loadIndex() {
 async function loadGlobalAudioSources() {
   const sources = [];
   for (const root of [DATA_ROOT, R18_DATA_ROOT]) {
-    const index = await fetchJsonOptional(`${root}audio/se/index.json`, null);
-    if (index?.cues) sources.push({ basePath: root, cues: index.cues });
+    for (const kind of ['se', 'bgm']) {
+      const index = await fetchJsonOptional(`${root}audio/${kind}/index.json`, null);
+      if (index?.cues) sources.push({ basePath: root, cues: index.cues });
+    }
   }
   return { sources };
 }
@@ -152,6 +236,7 @@ async function loadStory(storyId) {
   }
   app.story = storyData;
   app.script = app.story.scripts[0] || { commands: [], messages: [] };
+  await translator.loadStoryTranslations(meta.id, app.script);
   app.current = -1;
   app.running = false;
   app.labels = buildLabels(app.script.commands);
@@ -169,8 +254,8 @@ async function loadStory(storyId) {
   el.storyMeta.textContent = `${app.script.commands.length} commands / ${app.script.messages.length} messages`;
   el.seek.max = Math.max(0, app.script.commands.length - 1);
   el.seek.value = 0;
-  
-  renderStoryList();
+
+  updateActiveStoryItem();
   renderCommandList();
   updateInspectors();
   await nextText();
@@ -196,6 +281,21 @@ function storyBasePath(meta = app.storyMeta) {
 
 let thumbCache = null;
 
+function storyMatchesFilter(story) {
+  const { category, query } = app.filter;
+  if (category && story.category !== category) return false;
+  if (query) {
+    const hay = `${story.id} ${story.title || ''} ${story.scriptTitle || ''}`.toLowerCase();
+    if (!hay.includes(query)) return false;
+  }
+  return true;
+}
+
+function storyDisplayTitle(story) {
+  if (app.filter.titleMode && story.scriptTitle) return story.scriptTitle;
+  return story.title || story.id;
+}
+
 async function renderStoryList() {
   el.storyList.innerHTML = '';
   if (!thumbCache) {
@@ -211,10 +311,16 @@ async function renderStoryList() {
       thumbCache = {};
     }
   }
-  for (const story of app.index.stories) {
+  const stories = (app.index?.stories || []).filter(storyMatchesFilter);
+  const total = app.index?.stories?.length || 0;
+  el.storyCount.textContent = stories.length === total
+    ? `${total} stories`
+    : `${stories.length} / ${total} stories`;
+  for (const story of stories) {
     const item = document.createElement('div');
     item.className = `story-item${app.story?.id === story.id ? ' active' : ''}`;
-    
+    item.dataset.storyId = story.id;
+
     const storyIdStr = String(story.id).trim();
     let imgHtml = '';
     if (storyIdStr.endsWith('2')) {
@@ -226,14 +332,31 @@ async function renderStoryList() {
     item.innerHTML = `
       ${imgHtml}
       <div class="story-item-text-wrapper">
-        <div class="story-item-title">${escapeHtml(story.title || story.id)}</div>
+        <div class="story-item-title">${escapeHtml(storyDisplayTitle(story))}</div>
         <div class="story-item-meta">${story.stats.messageCount} text / ${story.stats.motionCount || 0} motions / ${story.stats.audioCueCount || 0} audio</div>
       </div>
     `;
-    
+
     item.addEventListener('click', () => loadStory(story.id));
     el.storyList.appendChild(item);
   }
+  scrollActiveStoryIntoView();
+}
+
+function scrollActiveStoryIntoView() {
+  const active = el.storyList.querySelector('.story-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+// 选中变化时只切 active class（保留滚动位置），不整表重建，避免列表跳回顶部。
+function updateActiveStoryItem() {
+  let active = null;
+  for (const item of el.storyList.children) {
+    const on = item.dataset && item.dataset.storyId === app.story?.id;
+    item.classList.toggle('active', Boolean(on));
+    if (on) active = item;
+  }
+  if (active) active.scrollIntoView({ block: 'nearest' });
 }
 
 function renderCommandList() {
@@ -299,11 +422,11 @@ async function executeAt(index, token, replaying, replayTargetIndex = -1) {
   app.current = index;
   const context = new NovelContext(app, app.controller, token, replaying, replayTargetIndex);
   const result = await app.registry.execute(context, command);
-  app.controller.scene.render();
-  updatePosition();
-  updateInspectors();
-  if (replaying) {
-    await new Promise(resolve => setTimeout(resolve, 5));
+  // 静默重建（replaying）时不逐帧渲染/更新面板/延时——只累积状态，最终画面由目标帧与 replayTo 尾部统一渲染。
+  if (!replaying) {
+    app.controller.scene.render();
+    updatePosition();
+    updateInspectors();
   }
   return result;
 }
@@ -328,10 +451,12 @@ async function replayTo(index) {
   app.asyncToken += 1;
   const currentAsyncToken = app.asyncToken;
   const basePath = storyBasePath();
-  app.controller.reset(app.story, basePath);
+  // keepBgm：跳转时保留正在播放的 bgm 元素与其 _liveChannels 记录，
+  // 让重建里的 bgmplay 命中「同曲」短路而无缝续放；异曲则由命令自然切换。
+  app.controller.reset(app.story, basePath, { keepBgm: true });
   await app.controller.live2d.loadStory(app.story, basePath);
   if (currentAsyncToken !== app.asyncToken) return;
-  app.controller.sound.loadStory(app.story, basePath);
+  app.controller.sound.loadStory(app.story, basePath, { keepBgm: true });
   app.current = -1;
   for (let i = 0; i <= index; i += 1) {
     const isLastFrame = (i === index);
@@ -339,16 +464,20 @@ async function replayTo(index) {
     if (token !== app.runToken) return;
     if (result?.jumpIndex != null && result.jumpIndex <= index) i = result.jumpIndex - 1;
   }
-  app.running = false; 
-  await new Promise(resolve => setTimeout(resolve, 5));
+  app.running = false;
   if (app.controller.scene && typeof app.controller.scene.render === 'function') {
     app.controller.scene.render();
   }
-  const voiceCue = app.controller.message.state.voiceCue;
-  
+  replayCurrentVoice();
+  queueAuto();
+}
+
+// 重播当前显示这句台词的语音（不推进剧情）。供跳转落点与「🔊 语音」按钮复用。
+function replayCurrentVoice() {
+  const voiceCue = app.controller?.message?.state?.voiceCue;
   try {
     app.controller.sound.stop('voice');
-  } catch(e) {}
+  } catch (e) {}
 
   if (voiceCue) {
     const voiceFactor = window.app?.config?.voiceVolume ?? 1.0;
@@ -369,7 +498,6 @@ async function replayTo(index) {
     if (window._liveChannels) delete window._liveChannels['voice'];
     if (app.controller.sound) app.controller.sound._activeVoiceLockId = null;
   }
-  queueAuto();
 }
 
 async function replayStoryForTest(storyId) {
@@ -536,12 +664,24 @@ class NovelArguments {
   }
 
   float(index, fallback = 0) {
-    const value = Number.parseFloat(this.args[index - 1]);
+    const raw = this.args[index - 1];
+    const s = raw == null ? '' : String(raw).trim();
+    if (s && !/^[+-]?(\d*\.?\d+)$/.test(s)) {
+      const e = evalNovelExpr(s);
+      if (e != null) return e;
+    }
+    const value = Number.parseFloat(raw);
     return Number.isFinite(value) ? value : fallback;
   }
 
   int(index, fallback = 0) {
-    const value = Number.parseInt(this.args[index - 1], 10);
+    const raw = this.args[index - 1];
+    const s = raw == null ? '' : String(raw).trim();
+    if (s && !/^[+-]?\d+$/.test(s)) {
+      const e = evalNovelExpr(s);
+      if (e != null) return Math.trunc(e);
+    }
+    const value = Number.parseInt(raw, 10);
     return Number.isFinite(value) ? value : fallback;
   }
 
@@ -560,9 +700,11 @@ class NovelModelController {
     this.async = new NovelModelAsync();
   }
 
-  reset(story, basePath) {
+  reset(story, basePath, { keepBgm = false } = {}) {
+    novelVars.clear();
     this.message.reset();
-    this.sound.stopAll();
+    if (keepBgm) this.sound.stopAllExceptBgm();
+    else this.sound.stopAll();
     this.live2d.reset();
     this.screen.reset();
     this.scene.reset();
@@ -579,16 +721,30 @@ class NovelModelMessage {
 
   reset() {
     this.state = { speaker: '', text: '', voiceCue: '', visible: true, shownAt: performance.now() };
+    this._hasContent = false;
     el.speaker.textContent = '';
     el.message.textContent = '';
     el.messageBox.style.opacity = '1';
+    if (el.replayVoiceBtn) el.replayVoiceBtn.disabled = true;
   }
 
   show(speaker, text, voiceCue = '') {
     this.state = { speaker, text, voiceCue, visible: true, shownAt: performance.now() };
-    el.speaker.textContent = speaker || '';
-    el.message.innerHTML = escapeHtml(text || '').replace(/&lt;br&gt;/g, '<br>');
+    this._hasContent = true;
+    this._render();
     el.messageBox.style.opacity = '1';
+  }
+
+  // 经翻译层渲染角色名与正文（官方译文→LLM 缓存→原文，含简繁/双语/AI 标记）
+  _render() {
+    el.speaker.innerHTML = translator.renderSpeaker(this.state.speaker);
+    el.message.innerHTML = translator.renderText(this.state.text).html;
+    if (el.replayVoiceBtn) el.replayVoiceBtn.disabled = !this.state.voiceCue;
+  }
+
+  // 设置变更或 LLM 预取完成后，重渲染当前显示的句子
+  rerender() {
+    if (this._hasContent) this._render();
   }
 
   setWindow(visible, seconds) {
@@ -974,6 +1130,11 @@ class NovelModelScene {
     target.emotion = '';
     target.emotionRaw = '';
     target.emotionDurationSeconds = 0;
+  }
+
+  silhouetteCharacter(tag, on, value) {
+    const target = this.target('characters', tag);
+    target.silhouette = { on: !!on, value: clamp(Number(value) || 0, 0, 1) };
   }
 
   focusAllCharacters() {
@@ -1592,7 +1753,8 @@ class NovelModelScene {
 
     const faceSrc = this.characterFaceUrl(item);
     if (faceSrc) {
-      const faceSize = rectSize(faceRect, 256, 256);
+      // 优先用表情差分的原生尺寸（避免被 faceContentRect 容器尺寸拉伸变形）
+      const faceSize = faceSpriteSize(item.asset, faceSrc) || rectSize(faceRect, 256, 256);
       const facePosition = rectPosition(faceRect);
       faceImage.hidden = false;
       faceImage.style.width = `${faceSize.x * unitScale}px`;
@@ -1730,8 +1892,9 @@ class NovelModelSound {
     this.pendingVoices = new Map();
   }
 
-  loadStory(story, basePath) {
-    this.stopAll();
+  loadStory(story, basePath, { keepBgm = false } = {}) {
+    if (keepBgm) this.stopAllExceptBgm();
+    else this.stopAll();
     this.storyCues = story.audio?.cues || {};
     this.globalCueSources = app.globalAudio?.sources || [];
     this.basePath = basePath;
@@ -1742,12 +1905,11 @@ class NovelModelSound {
     this.unlocked = true;
     this.blocked = false;
     try { this.ensureAudioContext()?.resume?.(); } catch (_) {}
-    const currentVoice = app.controller?.message?.state?.voiceCue || '';
-    for (const [key, audio] of this.elements.entries()) {
+    for (const [, audio] of this.elements.entries()) {
       if (!audio.src || !audio.paused) continue;
-      const isLoop = audio.dataset.loop === 'true';
-      const isCurrentVoice = key.startsWith('voice:') && audio.dataset.cue === currentVoice;
-      if (isLoop || isCurrentVoice) {
+      // 仅解锁真正被浏览器自动播放策略拦截、从未成功播放过的音频（loop bgm / 首句语音）。
+      // 已播完的语音状态为 'playend'，不再重播——避免点任意空白处又把语音重头放一遍。
+      if (audio.dataset.status === 'blocked') {
         audio.dataset.status = 'prep';
         audio.play()
           .then(() => {
@@ -2017,6 +2179,30 @@ class NovelModelSound {
     this.elements.clear();
     this.voiceAnalysers.clear();
     this.pendingVoices.clear();
+    // 清全局播放 bookkeeping，避免换剧情/停止后残留的 currentCue 让 bgmplay 误判「同曲」而跳过 play()。
+    window._liveChannels = {};
+  }
+
+  // 停掉 voice/se/bgv，但保留正在播放的 bgm 通道（元素 + 其 _liveChannels 记录），供跳转时无缝续放。
+  stopAllExceptBgm() {
+    const survivingBgmTags = new Set();
+    for (const [key, audio] of this.elements.entries()) {
+      if (key.startsWith('bgm:')) {
+        survivingBgmTags.add(key.slice('bgm:'.length));
+        continue;
+      }
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      this.elements.delete(key);
+    }
+    this.voiceAnalysers.clear();
+    this.pendingVoices.clear();
+    if (window._liveChannels) {
+      for (const tag of Object.keys(window._liveChannels)) {
+        if (!survivingBgmTags.has(tag)) delete window._liveChannels[tag];
+      }
+    }
   }
 
   currentLabels() {
@@ -2985,6 +3171,37 @@ class NovelCommandAsyncBase extends NovelCommandBase {
 
 class NoopCommand extends NovelCommandBase {}
 
+// setval：写入运行时变量表（对应原游戏 NovelCmdSetVal → NovelModelVal.SetVal）。value 支持表达式（args.float 已接入求值）。
+class SetValCommand extends NovelCommandBase {
+  async onExecute(context, command, args) {
+    const key = args.string(1);
+    if (key) novelVars.set(key, args.float(2, 0));
+  }
+}
+
+// popupbgfade：全屏 overlay 淡入到 rgba(r,g,b,a) over fadeTime（对应 NovelCmdPopupBgFade → NovelPopupBgFade.SetFade）。
+// args: (fadeTime, r, g, b, a)。复用 screen.colorFade（screenEffectLayer）。
+class PopupBgFadeCommand extends NovelCommandBase {
+  async onExecute(context, command, args) {
+    const seconds = args.float(1, 0.5);
+    const r = args.int(2, 0);
+    const g = args.int(3, 0);
+    const b = args.int(4, 0);
+    const a = args.int(5, 0);
+    const screen = context.models.screen;
+    const from = screen._popupBgAlpha ?? 0;
+    screen.colorFade(seconds, r, g, b, from, a);
+    screen._popupBgAlpha = a;
+  }
+}
+
+// silhouette：把某角色压成剪影/还原（对应 NovelCmdSilhouette）。args: (charaTag, on/off, value)。
+class SilhouetteCommand extends NovelCommandBase {
+  async onExecute(context, command, args) {
+    context.models.scene.silhouetteCharacter(args.string(1), args.on(2, true), args.float(3, 1));
+  }
+}
+
 class LabelCommand extends NovelCommandBase {
   async onExecute(context, command) {
     context.models.scene.state.currentLabel = command.label || command.rawCommand?.replace(/^:/, '');
@@ -3621,6 +3838,7 @@ class BgvPlayCommand extends NovelCommandBase {
     const cue = args.string(2, command.cue || '');
     const volume = args.float(3, 0);
     const highlight = args.on(4, false);
+    if (context.replaying) return; // bgv 是一次性背景语音；静默重建时不出声（与 se 一致）
     if (window._liveChannels && window._liveChannels[tag] && window._liveChannels[tag].currentCue === cue) {
       window._liveChannels[tag].origVolume = volume;
       const bgmFactor = window.app?.config?.bgmVolume ?? 1.0;
@@ -4587,10 +4805,15 @@ function buildCommandRegistry() {
     .register('cleanall', new CleanAllCommand())
     .register('cleanskip', new CleanSkipCommand())
     .register('initend', new NoopCommand())
+    .register('sectionbreak', new NoopCommand())
+    .register('setval', new SetValCommand())
+    .register('popupbgfade', new PopupBgFadeCommand())
+    .register('silhouette', new SilhouetteCommand())
     .register('message', new MessageCommand())
     .register('l2dmessage', new L2DMessageCommand())
     .register('messagetextcenter', new MessageTextCenterCommand())
     .register('messagetextunder', new MessageTextUnderCommand())
+    .register('dotmessage', new DotMessageCommand())
     .register('title', new TitleCommand())
     .register('window', new WindowCommand())
     .register('messagetextwindow', new MessageTextWindowCommand())
@@ -4733,7 +4956,7 @@ function buildCommandRegistry() {
 }
 
 function isTextPauseCommand(commandName) {
-  return new Set(['message', 'l2dmessage', 'messagetextcenter', 'messagetextunder', 'title']).has(String(commandName || '').toLowerCase());
+  return new Set(['message', 'l2dmessage', 'messagetextcenter', 'messagetextunder', 'dotmessage', 'title']).has(String(commandName || '').toLowerCase());
 }
 
 async function fetchJson(url) {
@@ -4821,6 +5044,8 @@ function screenEffectFilter(effect, value) {
 
 function characterFilter(item) {
   const parts = [];
+  // silhouette：把角色压成剪影（value 越接近 1 越黑）。对应原游戏 NovelCmdSilhouette。
+  if (item.silhouette && item.silhouette.on) parts.push(`brightness(${clamp(1 - item.silhouette.value, 0, 1)}) saturate(0)`);
   if (item.focus === false) parts.push('brightness(.62) saturate(.82)');
   if (item.color) {
     const a = normalizeAlpha(item.color.alpha);
@@ -4937,6 +5162,19 @@ function charaMoveEasing(value) {
 function characterDefaultHeight(character) {
   const value = Number(character?.asset?.defaultHeight ?? character?.defaultHeight);
   return Number.isFinite(value) ? value : 0;
+}
+
+// 表情差分应使用该 sprite 自身的原生像素尺寸（extract_charastand 存于 asset.spriteSizes），
+// 而不是 faceContentRect 容器尺寸——后者会把 face 拉伸变形（比脸大/错位）。
+function faceSpriteSize(asset, faceSrc) {
+  const sizes = asset?.spriteSizes || {};
+  const name = String(faceSrc || '').split('/').pop().replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+  for (const [k, v] of Object.entries(sizes)) {
+    if (k.toLowerCase() === name && Number(v?.width) > 0 && Number(v?.height) > 0) {
+      return { x: Number(v.width), y: Number(v.height) };
+    }
+  }
+  return null;
 }
 
 function rectSize(rect, fallbackX, fallbackY) {

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ドットアビス 剧情播放器</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #10131c; color: #e8ecf4;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    .wrap { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+    .dot { width: 56px; height: 56px; border-radius: 50%;
+      background: conic-gradient(#3b82f6, #56d364, #3b82f6); animation: spin 1.1s linear infinite; position: relative; }
+    .dot::after { content: ""; position: absolute; inset: 8px; border-radius: 50%; background: #10131c; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { color: #aab3c5; font-size: 14px; letter-spacing: .04em; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="dot"></div>
+    <p id="msg">正在启动本地服务…</p>
+  </div>
+</body>
+</html>

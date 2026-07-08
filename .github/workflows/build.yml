@@ -1,0 +1,84 @@
+name: build-desktop-client
+
+# 推送到 master 时自动构建 Windows 桌面客户端并作为 pre-release 上传。
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Fetch vgmstream
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path tools/bin/vgmstream | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/vgmstream/vgmstream/releases/latest/download/vgmstream-win64.zip" -OutFile vgmstream.zip
+          Expand-Archive -Path vgmstream.zip -DestinationPath tools/bin/vgmstream -Force
+
+      - name: Build (dotnet publish + PyInstaller + tauri build + portable)
+        shell: pwsh
+        run: pwsh -File build/build.ps1 -Portable
+
+      - name: Collect artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $out = "dist-release"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Get-ChildItem -Recurse -Path desktop/src-tauri/target/release/bundle -Include *.exe,*.msi -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $out -Force }
+          if (Test-Path build/DotAbyssPlayer-portable.zip) { Copy-Item build/DotAbyssPlayer-portable.zip $out -Force }
+          Get-ChildItem $out | ForEach-Object { Write-Host $_.Name }
+
+      - name: Publish pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "build-$($env:GITHUB_RUN_NUMBER)"
+          $sha = "$($env:GITHUB_SHA)".Substring(0,7)
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          gh release create $tag (Get-ChildItem dist-release/* | ForEach-Object { $_.FullName }) `
+            --prerelease `
+            --title "Desktop client build $($env:GITHUB_RUN_NUMBER) ($sha)" `
+            --notes "自动构建的 Windows 桌面客户端（pre-release）。提交 $sha。仅供个人离线使用，请勿公开分发。"

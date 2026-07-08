@@ -13,6 +13,21 @@
         <div class="app-title">DotAbyss ADV Reader</div>
         <div id="storyCount" class="muted">loading</div>
       </header>
+      <div class="story-filter">
+        <input id="storySearch" class="story-search" type="search" placeholder="搜索 ID / 角色名 / 标题…" autocomplete="off" />
+        <div class="story-cats" id="storyCats">
+          <button type="button" class="cat-chip active" data-cat="">全部</button>
+          <button type="button" class="cat-chip" data-cat="evs">活动</button>
+          <button type="button" class="cat-chip" data-cat="mas">主线</button>
+          <button type="button" class="cat-chip" data-cat="hmn">角色普通</button>
+          <button type="button" class="cat-chip" data-cat="hmr">角色R18</button>
+          <button type="button" class="cat-chip" data-cat="men">小活动</button>
+        </div>
+        <label class="title-mode-toggle" title="按剧情标题显示（无标题的自动回退到角色名/ID）">
+          <input type="checkbox" id="titleModeToggle" />
+          <span>剧情标题模式</span>
+        </label>
+      </div>
       <div id="storyList" class="story-list"></div>
     </aside>
 
@@ -60,6 +75,7 @@
         <button id="nextBtn" class="primary">Next</button>
         <button id="stepBtn">Step</button>
         <button id="autoBtn">Auto</button>
+        <button id="replayVoiceBtn" title="重播当前语音">🔊 语音</button>
         <input id="seek" type="range" min="0" max="0" value="0">
         <div id="position" class="position">0 / 0</div>
       </div>
@@ -108,6 +124,8 @@
   <script src="vendor/live2dcubismcore.min.js"></script>
   <script src="vendor/pixi.min.js"></script>
   <script src="vendor/cubism4.min.js"></script>
+  <script src="vendor/opencc.min.js"></script>
   <script type="module" src="src/app.js"></script>
+  <script src="src/client.js"></script>
 </body>
 </html>

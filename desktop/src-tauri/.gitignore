@@ -1,0 +1,5 @@
+resources/backend/*
+resources/bin/*
+!resources/**/.gitkeep
+target/
+gen/
