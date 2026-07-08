@@ -8,10 +8,11 @@
 //   * system tray (show / quit) + kill the backend child on exit;
 //   * an `enable_long_paths` command the first-run wizard can call (elevated reg write).
 
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -78,8 +79,7 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Data dir: portable (data-store next to exe) if a `portable.txt` marker exists, else None
-/// (the backend resolves %LOCALAPPDATA% itself).
+/// Data dir: portable (`data-store` next to exe) when a `portable.txt` marker exists.
 fn portable_data_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -89,13 +89,31 @@ fn portable_data_dir() -> Option<PathBuf> {
     None
 }
 
+/// The data dir the shell agrees on with the backend (kept in sync so logs land beside data).
+fn data_dir() -> PathBuf {
+    if let Some(p) = portable_data_dir() {
+        return p;
+    }
+    let base = std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| ".".into());
+    PathBuf::from(base).join("DotAbyssPlayer").join("data")
+}
+
+fn backend_log_path() -> PathBuf {
+    data_dir().join("backend.log")
+}
+
 fn spawn_backend(app: &tauri::AppHandle, port: u16) -> std::io::Result<Child> {
+    let data = data_dir();
+    let _ = std::fs::create_dir_all(&data);
+
     let mut cmd = backend_command(app);
     cmd.arg("--host").arg("127.0.0.1").arg("--port").arg(port.to_string());
+    cmd.env("DOTABYSS_DATA_DIR", &data);
 
-    if let Some(data) = portable_data_dir() {
-        cmd.env("DOTABYSS_DATA_DIR", data);
-    }
     // Point the backend at bundled tools if present (packaged / portable build).
     let downloader_rel = if cfg!(windows) { "bin/DotAbyssClient.exe" } else { "bin/DotAbyssClient" };
     if let Some(dl) = resource_file(app, downloader_rel) {
@@ -103,6 +121,14 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> std::io::Result<Child> {
     }
     if let Some(vg) = resource_file(app, "bin/vgmstream/vgmstream-cli.exe") {
         cmd.env("DOTABYSS_VGMSTREAM", vg);
+    }
+
+    // Redirect the child's stdout+stderr to a log file so import-time crashes / tracebacks
+    // are visible even though the shell spawns it without a console.
+    if let Ok(out) = File::create(backend_log_path()) {
+        if let Ok(err) = out.try_clone() {
+            cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
     }
 
     #[cfg(windows)]
@@ -132,9 +158,33 @@ fn healthz_ok(port: u16) -> bool {
     buf.starts_with("HTTP/1.") && buf.contains(" 200")
 }
 
-fn navigate_when_ready(window: WebviewWindow, port: u16) {
+fn fail_message(window: &WebviewWindow, extra: &str) {
+    let log = backend_log_path().to_string_lossy().replace('\\', "\\\\");
+    let msg = format!(
+        "本地服务启动失败{extra}。日志：{log}",
+    );
+    let js = format!(
+        "document.getElementById('msg') && (document.getElementById('msg').textContent='{}');",
+        msg.replace('\'', "\\'")
+    );
+    let _ = window.eval(&js);
+}
+
+fn backend_alive(app: &tauri::AppHandle) -> bool {
+    if let Some(state) = app.try_state::<Backend>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(child) = guard.as_mut() {
+                // try_wait -> Ok(Some(_)) means it already exited.
+                return !matches!(child.try_wait(), Ok(Some(_)));
+            }
+        }
+    }
+    false
+}
+
+fn navigate_when_ready(app: tauri::AppHandle, window: WebviewWindow, port: u16) {
     std::thread::spawn(move || {
-        // Poll up to ~60s for the backend to come up.
+        // Poll up to ~60s for the backend to come up, but fail fast if it exits early.
         for _ in 0..150 {
             if healthz_ok(port) {
                 if let Ok(url) = format!("http://127.0.0.1:{port}/").parse() {
@@ -142,11 +192,13 @@ fn navigate_when_ready(window: WebviewWindow, port: u16) {
                 }
                 return;
             }
+            if !backend_alive(&app) {
+                fail_message(&window, "（后端进程已退出，多为缺依赖/资源）");
+                return;
+            }
             std::thread::sleep(Duration::from_millis(400));
         }
-        let _ = window.eval(
-            "document.getElementById('msg') && (document.getElementById('msg').textContent='本地服务启动失败，请重启应用');",
-        );
+        fail_message(&window, "（超时）");
     });
 }
 
@@ -190,7 +242,7 @@ pub fn run() {
             build_tray(&handle)?;
 
             if let Some(window) = app.get_webview_window("main") {
-                navigate_when_ready(window, port);
+                navigate_when_ready(handle.clone(), window, port);
             }
             Ok(())
         })
