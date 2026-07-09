@@ -91,7 +91,16 @@
         </ul>
         ${state.longPathsOk ? '' : `<p class="client-warn">Windows 长路径未启用。建议以管理员身份启用后重开，否则深路径语音会缺失。</p>`}
         <div class="client-progress" hidden>
-          <div class="client-bar"><span></span></div>
+          <div class="client-prog-row">
+            <label>下载</label>
+            <div class="client-bar dl"><span></span></div>
+            <span class="client-prog-num" data-num="dl"></span>
+          </div>
+          <div class="client-prog-row">
+            <label>提取</label>
+            <div class="client-bar ex"><span></span></div>
+            <span class="client-prog-num" data-num="ex"></span>
+          </div>
           <div class="client-progress-text"></div>
         </div>
         <div class="client-actions">
@@ -102,8 +111,11 @@
 
     const startBtn = overlay.querySelector('[data-act="start"]');
     const progBox = overlay.querySelector('.client-progress');
-    const bar = overlay.querySelector('.client-bar span');
-    const text = overlay.querySelector('.client-progress-text');
+    const dlBar = overlay.querySelector('.client-bar.dl span');
+    const exBar = overlay.querySelector('.client-bar.ex span');
+    const dlNum = overlay.querySelector('[data-num="dl"]');
+    const exNum = overlay.querySelector('[data-num="ex"]');
+    const statusEl = overlay.querySelector('.client-progress-text');
 
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
@@ -112,35 +124,65 @@
       try {
         await apiPost('/api/setup', {});
       } catch (e) {
-        text.textContent = `启动失败：${e.message}`;
+        statusEl.textContent = `启动失败：${e.message}`;
         startBtn.disabled = false;
         startBtn.textContent = '重试';
         return;
       }
-      pollProgress(bar, text, () => { location.reload(); });
+      _poll(applyDual(dlBar, exBar, dlNum, exNum, statusEl), () => { location.reload(); });
     });
   }
 
-  function pollProgress(bar, text, onDone) {
+  const PHASE_LABEL = { planning: '准备中', base: '公共资源', stories: '剧情', translations: '翻译', updating: '更新中', done: '完成' };
+
+  // Shared poll loop: apply(progress) each tick; onDone() when finished (not on error).
+  function _poll(apply, onDone) {
     const tick = async () => {
       let p;
       try { p = await api('/api/progress'); } catch { setTimeout(tick, 1500); return; }
-      const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : (p.finished ? 100 : 5);
-      if (bar) bar.style.width = `${pct}%`;
-      const phase = { planning: '准备中', base: '公共资源', stories: '剧情', translations: '翻译', updating: '更新中', done: '完成' }[p.phase] || p.phase;
-      if (text) {
-        text.textContent = `${phase} · ${p.done}/${p.total || '?'} · 已下载 ${fmtBytes(p.bytes)}` +
-          (p.currentStory ? ` · ${p.currentStory}` : '') +
-          (p.errors && p.errors.length ? ` · ${p.errors.length} 处出错` : '');
-      }
+      apply(p);
       if (p.finished || p.phase === 'done' || p.phase === 'error') {
-        if (p.phase === 'error' && text) text.textContent = `出错：${p.message || ''}`;
-        else onDone();
+        if (p.phase !== 'error') onDone();
         return;
       }
       setTimeout(tick, 1500);
     };
     tick();
+  }
+
+  // Single bar (used by update / repair banners).
+  function pollProgress(bar, text, onDone) {
+    _poll((p) => {
+      const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : (p.finished ? 100 : 5);
+      if (bar) bar.style.width = `${pct}%`;
+      if (!text) return;
+      if (p.phase === 'error') { text.textContent = `出错：${p.message || ''}`; return; }
+      const phase = PHASE_LABEL[p.phase] || p.phase;
+      text.textContent = `${phase} · ${p.done}/${p.total || '?'} · 已下载 ${fmtBytes(p.bytes)}` +
+        (p.currentStory ? ` · ${p.currentStory}` : '') +
+        (p.errors && p.errors.length ? ` · ${p.errors.length} 处出错` : '');
+    }, onDone);
+  }
+
+  // Dual bars (wizard): download (leads) + extract (trails), both by story count.
+  function applyDual(dlBar, exBar, dlNum, exNum, statusEl) {
+    return (p) => {
+      const total = p.total || 0;
+      const pct = (n) => total ? Math.min(100, Math.round((n / total) * 100)) : (p.finished ? 100 : 0);
+      dlBar.style.width = `${total ? pct(p.downloaded) : (p.finished ? 100 : 5)}%`;
+      exBar.style.width = `${pct(p.done)}%`;
+      dlNum.textContent = total ? `${p.downloaded}/${total} 篇 · ${fmtBytes(p.bytes)}` : fmtBytes(p.bytes);
+      exNum.textContent = total ? `${p.done}/${total} 篇` : '';
+      if (p.phase === 'error') { statusEl.textContent = `出错：${p.message || ''}`; return; }
+      const BASE_LABEL = { 'base:background': '背景', 'base:charastand': '立绘', 'base:se': '音效', 'base:bgm': 'BGM' };
+      let s;
+      if (p.phase === 'base') s = `公共资源（${BASE_LABEL[p.message] || p.message || '资源'}）提取中…`;
+      else if (p.phase === 'translations') s = '翻译下载中…';
+      else if (p.phase === 'stories') s = `剧情提取中${p.currentStory ? ' · ' + p.currentStory : ''}`;
+      else s = PHASE_LABEL[p.phase] || p.phase;
+      if (p.errors && p.errors.length) s += ` · ${p.errors.length} 处出错`;
+      statusEl.textContent = s;
+    };
   }
 
   // ---- update banner ------------------------------------------------------

@@ -764,6 +764,13 @@ pre {
 .client-bar.inline { display: inline-block; width: 160px; vertical-align: middle; margin: 0 10px; }
 .client-bar span { display: block; height: 100%; width: 5%; background: linear-gradient(90deg, #3b82f6, #56d364); transition: width .4s; }
 .client-progress-text { margin-top: 8px; font-size: 12px; color: #aab3c5; }
+/* dual bars (wizard): download (blue) leads, extract (green) trails */
+.client-prog-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.client-prog-row > label { flex: 0 0 32px; font-size: 12px; color: #aab3c5; }
+.client-prog-row .client-bar { flex: 1 1 auto; }
+.client-bar.dl span { background: linear-gradient(90deg, #2f6fe0, #3b82f6); }
+.client-bar.ex span { background: linear-gradient(90deg, #2ea043, #56d364); }
+.client-prog-num { flex: 0 0 auto; min-width: 96px; text-align: right; font-size: 12px; color: #cdd5e5; font-variant-numeric: tabular-nums; }
 
 .client-banner {
   position: fixed; top: 0; left: 0; right: 0; z-index: 9998;

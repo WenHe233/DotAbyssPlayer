@@ -188,7 +188,8 @@ class Progress:
         self.state = {
             "phase": "idle",       # idle|planning|base|stories|updating|done|error
             "message": "",
-            "done": 0,
+            "downloaded": 0,       # stories whose download step finished (leads `done`)
+            "done": 0,             # stories fully extracted
             "total": 0,
             "currentStory": "",
             "bytes": 0,
@@ -212,6 +213,14 @@ class Progress:
     def tick(self, story: str = ""):
         with self._lock:
             self.state["done"] += 1
+            if story:
+                self.state["currentStory"] = story
+            self.state["updatedAt"] = time.time()
+            self._flush()
+
+    def download_tick(self, story: str = ""):
+        with self._lock:
+            self.state["downloaded"] += 1
             if story:
                 self.state["currentStory"] = story
             self.state["updatedAt"] = time.time()
@@ -411,8 +420,11 @@ def run_stories_concurrent(units, data_root: Path, tmp_root: Path, vgmstream: st
                 story_tmp = _download_story(unit, tmp_root, progress)
             except Exception as exc:  # noqa: BLE001 — skip this story, keep the pipeline going
                 progress.error(f"download:{unit.story_id}", repr(exc))
-                progress.tick(unit.story_id)  # count the skip so done/total stays consistent
+                # Count the skip on both bars so downloaded/done both still reach total.
+                progress.download_tick()
+                progress.tick(unit.story_id)
                 continue
+            progress.download_tick(unit.story_id)
             q.put((unit, story_tmp))          # blocks when full -> disk backpressure
         for _ in range(workers):
             q.put(_SENTINEL)
