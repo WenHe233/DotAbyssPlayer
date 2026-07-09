@@ -55,8 +55,25 @@
       showWizard(state);
     } else {
       mountQoL();
-      checkUpdate(state).catch(() => {});
+      if (state.sharedAssetsOk === false) showRepairBanner(state);
+      else checkUpdate(state).catch(() => {});
     }
+  }
+
+  // ---- repair shared assets (audio/emotion) banner ------------------------
+  function showRepairBanner(state) {
+    const what = (state.missingShared || []).join('、') || '共享资源';
+    const banner = el('div', 'client-banner');
+    banner.innerHTML = `<span>共享资源缺失（${escapeHtml(what)}），BGM/音效/表情可能无法显示</span>
+      <button class="client-btn small primary" data-act="fix">一键修复</button>
+      <button class="client-btn small" data-act="dismiss">稍后</button>`;
+    document.body.appendChild(banner);
+    banner.querySelector('[data-act="dismiss"]').addEventListener('click', () => banner.remove());
+    banner.querySelector('[data-act="fix"]').addEventListener('click', async () => {
+      banner.innerHTML = `<span>修复中（仅重下公共资源，不动剧情）…</span><div class="client-bar inline"><span></span></div><span class="client-banner-text"></span>`;
+      try { await apiPost('/api/rebuild-base', {}); } catch (e) { banner.querySelector('.client-banner-text').textContent = e.message; return; }
+      pollProgress(banner.querySelector('.client-bar span'), banner.querySelector('.client-banner-text'), () => location.reload());
+    });
   }
 
   // ---- first-run wizard ---------------------------------------------------

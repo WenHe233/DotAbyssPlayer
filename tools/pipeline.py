@@ -542,12 +542,32 @@ def run_base(plan: Plan, data_root: Path, tmp_root: Path, vgmstream: str | None,
         if progress:
             progress.update(phase="base", message="base:bgm", currentStory="bgm")
         try:
-            _run_bgm_extractor(catalog, data_dir, tmp_root, vgmstream)
+            _run_bgm_extractor(catalog, data_dir, tmp_root, vgmstream, _derive_base_url(plan))
         except Exception as exc:  # noqa: BLE001
             if progress:
                 progress.error("base:bgm", repr(exc))
 
     _finalize_base_audio(data_dir)
+
+    # Don't let base failures pass silently (they used to only reach backend.log).
+    missing = missing_shared_assets(data_dir)
+    if missing and progress:
+        progress.error("base:verify", "missing shared assets: " + ", ".join(missing))
+
+
+# Shared assets the player needs from the base phase; front-end offers a repair if any missing.
+def missing_shared_assets(data_dir: Path) -> list[str]:
+    needed = {
+        "audio/se": data_dir / "audio" / "se" / "index.json",
+        "audio/bgm": data_dir / "audio" / "bgm" / "index.json",
+        "backgrounds": data_dir / "backgrounds" / "novel" / "index.json",
+        "chara": data_dir / "chara" / "index.json",
+    }
+    return [name for name, path in needed.items() if not path.exists()]
+
+
+def shared_assets_ok(data_dir: Path) -> bool:
+    return not missing_shared_assets(data_dir)
 
 
 def _finalize_base_audio(data_dir: Path):
@@ -616,12 +636,26 @@ def _run_shared_extractor(name: str, bundle_root: Path, data_dir: Path, stories_
         _invoke_module_main("extract_global_se_assets", args)
 
 
-def _run_bgm_extractor(catalog: Path, data_dir: Path, tmp_root: Path, vgmstream: str | None):
+def _derive_base_url(plan: Plan) -> str | None:
+    """Addressables base URL (…/aas/<ver>/aa/) from any manifest row — the BGM extractor needs
+    it to fetch awb, and its default derivation reads a hardcoded reference story.json that does
+    not exist in the client."""
+    for unit in plan.stories.values():
+        for row in unit.rows:
+            if row.url and row.remote and row.url.endswith(row.remote):
+                return row.url[: len(row.url) - len(row.remote)]
+    return None
+
+
+def _run_bgm_extractor(catalog: Path, data_dir: Path, tmp_root: Path,
+                       vgmstream: str | None, base_url: str | None = None):
     args = ["--catalog", str(catalog),
             "--output", str(data_dir / "audio" / "bgm"),
             "--raw-root", str(tmp_root / "_bgm_awb")]
     if vgmstream:
         args += ["--vgmstream", vgmstream]
+    if base_url:
+        args += ["--base-url", base_url]
     _invoke_module_main("extract_global_bgm_assets", args)
     shutil.rmtree(tmp_root / "_bgm_awb", ignore_errors=True)
 
@@ -666,6 +700,7 @@ def run_setup(manifest_path: Path, data_root: Path, *, tmp_root: Path | None = N
 
     state["version"] = version or state.get("version")
     state["profile"] = profile or state.get("profile")
+    state["sharedAssetsOk"] = shared_assets_ok(data_root)
     save_state(data_root, state)
     shutil.rmtree(tmp_root, ignore_errors=True)
     progress.update(phase="done", finished=True, message="setup complete")

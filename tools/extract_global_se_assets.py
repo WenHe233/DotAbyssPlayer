@@ -35,6 +35,14 @@ DEFAULT_OUTPUT_ROOT = WORKSPACE / "src" / "AdvPlayer" / "data" / "audio" / "se"
 
 
 def load_adv_extract_module():
+    # Prefer a normal import: works in the frozen client (bundled hiddenimport) and when run
+    # via the pipeline / as a standalone script (tools dir is on sys.path). Only fall back to
+    # loading the .py by path for exotic setups — a frozen exe has no .py files on disk.
+    try:
+        import adv_extract  # noqa: PLC0415
+        return adv_extract
+    except Exception:  # noqa: BLE001
+        pass
     path = WORKSPACE / "tools" / "adv_extract.py"
     spec = importlib.util.spec_from_file_location("adv_extract", path)
     if spec is None or spec.loader is None:

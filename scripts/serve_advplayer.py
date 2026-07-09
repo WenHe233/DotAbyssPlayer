@@ -402,6 +402,25 @@ def _job_repair(progress: pipeline.Progress, story_id: str):
     pipeline.extract_one(MANIFEST_PATH, DATA_DIR, story_id, vgmstream=_vgmstream(), progress=progress)
 
 
+def _job_rebuild_base(progress: pipeline.Progress, profile: str):
+    """Re-run only the shared base phase (SE/BGM/bg/chara/emotion) — no story re-download."""
+    if not MANIFEST_PATH.exists():
+        refresh_manifest(profile)
+    rows = pipeline.read_manifest(MANIFEST_PATH)
+    plan = pipeline.plan_from_manifest(rows)
+    tmp_root = DATA_DIR / "_work"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    pipeline._ensure_command_info()
+    progress.update(phase="base", message="repairing shared assets", total=0, done=0)
+    pipeline.run_base(plan, DATA_DIR, tmp_root, _vgmstream(),
+                      CATALOG_JSON if CATALOG_JSON.exists() else None, progress)
+    shutil.rmtree(tmp_root, ignore_errors=True)
+    state = pipeline.load_state(DATA_DIR)
+    state["sharedAssetsOk"] = pipeline.shared_assets_ok(DATA_DIR)
+    pipeline.save_state(DATA_DIR, state)
+    progress.update(phase="done", finished=True, message="shared assets repaired")
+
+
 def _remove_from_index(story_id: str):
     path = DATA_DIR / "index.json"
     if not path.exists():
@@ -430,6 +449,7 @@ def compute_state() -> dict:
         free = shutil.disk_usage(DATA_DIR if DATA_DIR.exists() else DATA_DIR.parent).free
     except Exception:  # noqa: BLE001
         free = None
+    missing_shared = pipeline.missing_shared_assets(DATA_DIR)
     return {
         "dataDir": str(DATA_DIR),
         "installed": story_count > 0,
@@ -440,6 +460,9 @@ def compute_state() -> dict:
         "diskFree": free,
         "longPathsOk": _long_paths_ok(),
         "llmEnabled": bool(load_llm_config().get("api_key")),
+        # Only meaningful once stories are installed; a fresh (empty) dir isn't "broken".
+        "sharedAssetsOk": (story_count == 0) or not missing_shared,
+        "missingShared": missing_shared,
     }
 
 
@@ -508,6 +531,10 @@ class AdvPlayerHandler(http.server.SimpleHTTPRequestHandler):
         if p == "/api/update/apply":
             body = self._read_json()
             ok = JOBS.start("update", _job_update, body.get("profile") or DEFAULT_PROFILE)
+            return self._send_json({"started": ok, "busy": not ok})
+        if p == "/api/rebuild-base":
+            body = self._read_json()
+            ok = JOBS.start("rebuild-base", _job_rebuild_base, body.get("profile") or DEFAULT_PROFILE)
             return self._send_json({"started": ok, "busy": not ok})
         if p == "/api/repair":
             body = self._read_json()

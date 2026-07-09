@@ -35,6 +35,13 @@ USER_AGENT = "DotAbyssClient/1.0"
 
 
 def load_adv_extract():
+    # Frozen-safe: a normal import works in the packaged client (bundled hiddenimport) and via
+    # the pipeline / standalone script; the .py-by-path fallback is only for exotic setups.
+    try:
+        import adv_extract  # noqa: PLC0415
+        return adv_extract
+    except Exception:  # noqa: BLE001
+        pass
     path = WORKSPACE / "tools" / "adv_extract.py"
     spec = importlib.util.spec_from_file_location("adv_extract", path)
     module = importlib.util.module_from_spec(spec)

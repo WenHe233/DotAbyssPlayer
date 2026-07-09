@@ -8,7 +8,6 @@
 //   * system tray (show / quit) + kill the backend child on exit;
 //   * an `enable_long_paths` command the first-run wizard can call (elevated reg write).
 
-use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -124,8 +123,9 @@ fn spawn_backend(app: &tauri::AppHandle, port: u16) -> std::io::Result<Child> {
     }
 
     // Redirect the child's stdout+stderr to a log file so import-time crashes / tracebacks
-    // are visible even though the shell spawns it without a console.
-    if let Ok(out) = File::create(backend_log_path()) {
+    // are visible even though the shell spawns it without a console. Append (not truncate) so a
+    // later relaunch doesn't wipe the setup-phase errors that explain a broken install.
+    if let Ok(out) = std::fs::OpenOptions::new().create(true).append(true).open(backend_log_path()) {
         if let Ok(err) = out.try_clone() {
             cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
         }

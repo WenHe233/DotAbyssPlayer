@@ -297,6 +297,17 @@ def image_sprite_refs(env) -> dict[str, int]:
     return refs
 
 
+def _safe_rel(bundle: Path) -> str:
+    # Provenance string only. relative_to(WORKSPACE) throws in the client (bundles live in the
+    # data-store, not under the repo/frozen dir) — try the bundle root first, then fall back.
+    for base in (CHARASTAND_ROOT, WORKSPACE):
+        try:
+            return bundle.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return bundle.name
+
+
 def extract_character(character_id: str, bundle: Path) -> dict:
     env = UnityPy.load(str(bundle))
     out_dir = OUTPUT_ROOT / character_id.lower()
@@ -342,7 +353,7 @@ def extract_character(character_id: str, bundle: Path) -> dict:
 
     metadata = {
         "id": character_id,
-        "sourceBundle": str(bundle.relative_to(WORKSPACE)).replace("\\", "/"),
+        "sourceBundle": _safe_rel(bundle),
         "rootRect": rect_with_world_position(f"CharaStand{character_id}", rects, rects_by_go_id, rect_owner_by_rect_id, go_id_by_name)
         or rect_with_world_position(f"CharaStand{character_id.upper()}", rects, rects_by_go_id, rect_owner_by_rect_id, go_id_by_name)
         or rect_with_world_position("Root", rects, rects_by_go_id, rect_owner_by_rect_id, go_id_by_name),
@@ -364,7 +375,16 @@ def extract_character(character_id: str, bundle: Path) -> dict:
 def extract_emotions() -> list[dict]:
     EMOTION_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     extracted = []
-    for bundle in sorted(EMOTION_ROOT.glob("*.bundle")):
+    # rglob (not glob): the client downloads emotion bundles into a nested group dir
+    # (general-ui/.../emotion/charastand/prefabs/emo/*.bundle), not the top level. Restrict to
+    # the emotion-charastand path so a shared group root doesn't drag in charastand-prefab bundles.
+    candidates = [
+        b for b in EMOTION_ROOT.rglob("*.bundle")
+        if "emotion/charastand" in b.as_posix().lower() or b.parent.name.lower() == "emo"
+    ]
+    if not candidates:  # dev layout: EMOTION_ROOT already IS the emo dir
+        candidates = list(EMOTION_ROOT.glob("*.bundle"))
+    for bundle in sorted(candidates):
         key = bundle.name.split(".prefab_", 1)[0].lower()
         env = UnityPy.load(str(bundle))
         parts_dir = EMOTION_OUTPUT_ROOT / "parts" / key
